@@ -389,7 +389,7 @@ final class ChordView: NSView {
     }
 
     /// Top right, above the settings: one cell per step with its chord (– when empty), orange at the playhead.
-    /// The cursor is a rounded bar in the gap between cells, gray (red while recording).
+    /// The cursor is a red rounded bar in the gap between cells.
     func drawSequence() {
         let gap: CGFloat = 8, w: CGFloat = 49, top: CGFloat = 12, h: CGFloat = 46
         let n = Sequencer.cellCount
@@ -408,7 +408,7 @@ final class ChordView: NSView {
                             withAttributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: ink.withAlphaComponent(0.6)])
         }
         let x = left + CGFloat(seq.cursor) * (w + gap) - gap / 2
-        (recSlot != nil ? NSColor.systemRed : NSColor(white: 0.7, alpha: 1)).setFill()
+        NSColor.systemRed.setFill()
         NSBezierPath(roundedRect: NSRect(x: x - 1.5, y: top + 2, width: 3, height: h - 4), xRadius: 1.5, yRadius: 1.5).fill()
     }
 
