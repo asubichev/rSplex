@@ -27,8 +27,14 @@ public enum VoiceEvent: Equatable {
     /// Releases every note on one layer.
     case releaseLayer(Int)
     case setBPM(Double)
-    /// Drops this layer's scheduled events that haven't played yet.
+    /// Drops this layer's scheduled events that haven't played yet (for the sequencer, a pending MIDI Start too).
     case cancelScheduled(layer: Int)
+    /// Turns MIDI mirroring on or off; turning it off sends note-offs for anything sounding.
+    case setMIDI(Bool)
+    /// MIDI transport, scheduled with the sequencer so Start lands on its first step.
+    case midiStart, midiStop
+    /// Silences the built-in synth (voices keep running, so MIDI and timing are unaffected).
+    case setMuted(Bool)
 }
 
 /// Live playing is layer 0; the sequencer plays on its own layer.
@@ -76,6 +82,11 @@ public struct VoiceEngine {
     public private(set) var beats = 0.0
     public private(set) var sampleTime: Int64 = 0
     private var lp = 0.0
+    public private(set) var muted = false
+    /// MIDI mirror of everything played, stamped with the frame in the current buffer. Read and clear after render.
+    public var midi = MIDITap()
+    /// Frame within the buffer being rendered, so events handled mid-buffer get the right MIDI timestamp.
+    private var frame = 0
     /// Pending timed events, sorted by beat. Preallocated so scheduling never allocates on the audio thread.
     public static let scheduleCapacity = 1024
     private var scheduled: [TimedEvent] = []
@@ -106,15 +117,20 @@ public struct VoiceEngine {
 
     public mutating func handle(_ e: VoiceEvent) {
         switch e {
-        case .noteOn(let n, let adsr, let gain, let layer): noteOn(n, adsr, gain, layer)
+        case .noteOn(let n, let adsr, let gain, let layer):
+            noteOn(n, adsr, gain, layer)
+            midi.noteOn(n, layer: layer, at: frame)
         case .noteOff(let n, let layer):
+            midi.noteOff(n, layer: layer, at: frame)
             for i in voices.indices where voices[i].note == n && voices[i].layer == layer
                 && voices[i].stage != .idle && voices[i].stage != .release {
                 startRelease(i)
             }
         case .allNotesOff:
+            midi.allNotesOff(at: frame)
             for i in voices.indices where voices[i].stage != .idle && voices[i].stage != .release { startRelease(i) }
         case .releaseLayer(let l):
+            midi.releaseLayer(l, at: frame)
             for i in voices.indices where voices[i].layer == l && voices[i].stage != .idle && voices[i].stage != .release {
                 startRelease(i)
             }
@@ -123,9 +139,17 @@ public struct VoiceEngine {
             scheduled.removeAll { e in
                 switch e.event {
                 case .noteOn(_, _, _, let l), .noteOff(_, let l): l == layer
+                case .midiStart: layer == sequencerLayer
                 default: false
                 }
             }
+        case .setMIDI(let on):
+            if !on, midi.enabled { midi.allNotesOff(at: frame) }
+            if on, !midi.enabled { midi.reset() }
+            midi.enabled = on
+        case .midiStart: midi.start(beats: beats, at: frame)
+        case .midiStop: midi.emit(.stop, at: frame)
+        case .setMuted(let m): muted = m
         }
     }
 
@@ -184,6 +208,7 @@ public struct VoiceEngine {
     public mutating func render(frames: Int, into out: UnsafeMutablePointer<Float>) {
         let sr = sampleRate
         for f in 0..<frames {
+            frame = f
             while let first = scheduled.first, first.beat <= beats { scheduled.removeFirst(); handle(first.event) }
             var s = 0.0
             for i in voices.indices where voices[i].stage != .idle {
@@ -198,10 +223,12 @@ public struct VoiceEngine {
                 s += osc * v.level * v.gain * Self.voiceGain
             }
             lp += 0.2 * (s - lp)
-            out[f] = Float(Self.softClip(lp))
+            out[f] = muted ? 0 : Float(Self.softClip(lp))
+            midi.tickClock(beats: beats, at: f)
             beats += bpm / 60 / sr
             sampleTime += 1
         }
+        frame = 0   // events handled between buffers belong to the start of the next one
     }
 
     /// Unchanged below 0.8; above, eases toward 1 so big chords can't clip.

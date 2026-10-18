@@ -49,13 +49,18 @@ independently (today the whole chord shares one envelope). This release builds b
 
 ## v1.3 — MIDI out (priority after the sequencer)
 
-Primary use case: driving a **TE OP-1 field over USB-C**. The OP-1 field shows up on the Mac as a class-compliant USB
-MIDI device, so this is CoreMIDI output to a chosen destination.
-- Choose the MIDI destination (default to an OP-1 field if connected); channel select.
-- Send note on/off for everything that sounds: chords, bass, sequencer (and the arp, if it ships).
-- Optionally send MIDI clock so the OP-1 field's tempo follows the app.
-- Toggle whether the built-in synth also plays.
-- Verified on a real OP-1 field before merge.
+Primary use case: driving a **TE OP-1 field over USB-C** (class-compliant USB MIDI, so CoreMIDI output).
+- **M** cycles the output: OFF → `rSplex` virtual source (for DAWs) → each connected destination → OFF. An OP-1 is
+  picked automatically when connected, until you choose an output yourself. Unplugging the chosen device turns MIDI off.
+- Everything that sounds is sent on channel 1, velocity 100: live chords, bass, and the sequencer. Live and sequencer
+  notes on the same pitch are counted, so one never cuts the other off.
+- Timing: each message is stamped with the host time of its audio sample (plus output latency), so MIDI and audio
+  stay aligned and sequencer steps are sample-accurate on the device.
+- MIDI clock (24 ppqn) runs continuously at the app's tempo; Start goes out on the sequencer's first step, Stop on
+  Space. The OP-1's tempo can follow the app.
+- The built-in synth is muted while MIDI is on. Switching outputs or quitting sends note-offs and All Notes Off.
+- Still to decide: channel select, velocity, whether the built-in synth can play along, and whether clock should
+  only run while the sequencer plays. Verify on a real OP-1 field before merge.
 
 ## v1.4 — Sounds
 
@@ -94,6 +99,6 @@ hardware-only features (battery, USB modes, firmware).
 
 ## Keyboard layout
 
-Taken: `A`–`J` chords, `1`–`0` modifiers, arrows, Tab, `V` `B` `L` `E`, and for the sequencer Space
+Taken: `A`–`J` chords, `1`–`0` modifiers, arrows, Tab, `V` `B` `L` `E` `M`, and for the sequencer Space
 `[` `]` `\`. Shift is the sequencer modifier: Shift + chord records, Shift + arrows move the cursor and change step
 length, Shift+Delete deletes. Prefer Shift keychords over new single keys. The arp draft uses `R` `T` `Y`.
