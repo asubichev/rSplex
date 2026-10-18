@@ -4,8 +4,8 @@ Scope rule: every feature is intentional, specified before it's built, tested wh
 it merges. Anything that doesn't feel right gets cut, not shipped. Each feature gets an issue (with what "done" means),
 a branch, and a PR. Every merge to `main` publishes a release, so features stay on their branch until they're finished.
 
-Current release: **v1.0** — 7 diatonic chord keys, held number-row modifiers, key/scale/octave, inversions, voice
-leading, bass (OFF/ROOT/SLASH).
+Current release: **v1.1** — 7 diatonic chord keys, held number-row modifiers, key/scale/octave (−2…+2), inversions,
+voice leading, bass (OFF/ROOT/SLASH), hold-to-lock, per-note voice engine with envelope presets.
 
 ## v1.1 — Polish + foundation
 
@@ -34,39 +34,51 @@ independently (today the whole chord shares one envelope). This release builds b
 - **Window loses focus:** the lock survives (it's meant to be hands-free); held, unlocked keys still release as today.
 - Later, maybe: let sound-only settings change a locked chord without breaking it. Niche, so not now.
 
-## v1.2 — Arpeggiator
+## v1.2 — Sequencer
 
-Arpeggio mode:
+- Each step stores degree, number-row modifier, and slash bass. Notes are worked out at playback, so key,
+  scale, octave, voicing, and bass changes apply to the whole sequence.
+- 8 fixed cells (– when empty; cells never shift). The cursor sits between cells. Shift + chord records into the
+  cell after the cursor until every chord key is up, following whatever you end on (modifier changes, switching
+  chords). Shift+Delete empties the cell before the cursor; Shift+←/→ move the cursor. Playback loops up to the last
+  filled cell, with empty cells before it as rests.
+- Space play/stop, step length 1/4 to 2 bars (Shift+↑ shorter, Shift+↓ longer), tempo `[` `]` and tap tempo `\`,
+  sample-accurate timing.
+- Live playing works over a running sequence without cutting its notes.
+- Sits top right. No saving: the sequence lives until you quit, by design.
+
+## v1.3 — MIDI out (priority after the sequencer)
+
+Primary use case: driving a **TE OP-1 field over USB-C**. The OP-1 field shows up on the Mac as a class-compliant USB
+MIDI device, so this is CoreMIDI output to a chosen destination.
+- Choose the MIDI destination (default to an OP-1 field if connected); channel select.
+- Send note on/off for everything that sounds: chords, bass, sequencer (and the arp, if it ships).
+- Optionally send MIDI clock so the OP-1 field's tempo follows the app.
+- Toggle whether the built-in synth also plays.
+- Verified on a real OP-1 field before merge.
+
+## v1.4 — Sounds
+
+- Sine, triangle, saw, and one natural-sounding instrument (piano-like).
+
+## v1.5 — Effects
+
+- Reverb, BPM-synced delay, and a filter with low-pass and high-pass.
+
+## Tabled: Arpeggiator
+
+Parked to ship the sequencer first; we'll pick it back up later. A working draft is on PR #10 (`v1.2-arp`, not
+merged): R mode (ARP / CHORD+ARP), T pattern, Y rate, audio-thread clock, bass held under the arp.
+Open problem before it can ship: adding a 7th or 9th changes the cycle length, which breaks the rhythm.
+
+Original scope:
 - Patterns: Up, Down, Up/Down, Down/Up, Random, Fingerpick.
 - Rates: 1/1, 1/2, 1/4, 1/8 (default), 1/16, 1/16T, 1/32, Swing 8th, Swing 16th — synced to BPM.
 - Gate length tied to release time, as on the device.
 - Layering: Arp only, Chord + Arp, Rhythm + Arp.
 - A locked chord keeps arpeggiating.
 - Stretch, only if it feels right: Strum and Repeat modes (small once the clock exists).
-
-## v1.3 — Sequencer
-
-- Up to 16 steps; each step stores degree, modifier, and bass.
-- Enter steps by pressing chord keys; play/stop, move the cursor, replace a step, add/remove 4 steps.
-- Plays through the arpeggiator when it's on.
-
-## v1.4 — MIDI out (priority after the sequencer)
-
-Primary use case: driving a **TE OP-1 field over USB-C**. The OP-1 field shows up on the Mac as a class-compliant USB
-MIDI device, so this is CoreMIDI output to a chosen destination.
-- Choose the MIDI destination (default to an OP-1 field if connected); channel select.
-- Send note on/off for everything that sounds: chords, bass, arp, sequencer.
-- Optionally send MIDI clock so the OP-1 field's tempo follows the app.
-- Toggle whether the built-in synth also plays.
-- Verified on a real OP-1 field before merge.
-
-## v1.5 — Sounds
-
-- Sine, triangle, saw, and one natural-sounding instrument (piano-like).
-
-## v1.6 — Effects
-
-- Reverb, BPM-synced delay, and a filter with low-pass and high-pass.
+- If it ships, the sequencer should be able to play through it.
 
 ## Later candidates (pick deliberately, not all)
 
@@ -80,7 +92,8 @@ MIDI device, so this is CoreMIDI output to a chosen destination.
 Looper, vocoder, mic sampling, drum machine and loops, Chord Hiro, Ear Trainer, tuner, companion app, and
 hardware-only features (battery, USB modes, firmware).
 
-## Keyboard layout (decide before v1.2)
+## Keyboard layout
 
-Taken: `A`–`J` chords, `1`–`0` modifiers, arrows, Tab, `Z` `V` `B`.
-Proposed: `Q`–`P` row for play/arp/sequencer modes and pattern select, Space for start/stop, `[` `]` for tempo.
+Taken: `A`–`J` chords, `1`–`0` modifiers, arrows, Tab, `V` `B` `L` `E`, and for the sequencer Space
+`[` `]` `\`. Shift is the sequencer modifier: Shift + chord records, Shift + arrows move the cursor and change step
+length, Shift+Delete deletes. Prefer Shift keychords over new single keys. The arp draft uses `R` `T` `Y`.

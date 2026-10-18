@@ -185,7 +185,7 @@ public struct RSplexState {
         return n
     }
 
-    private mutating func renderHeld() -> Output? {
+    mutating func renderHeld() -> Output? {
         guard let deg = held.last else { return nil }
         let c = chord(degree: deg, key: key, scale: scale, mod: mods.last)
         let root = rootMidi(degree: deg)

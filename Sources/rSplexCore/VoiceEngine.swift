@@ -19,10 +19,26 @@ public let bpmRange = 40.0...300.0
 
 public enum VoiceEvent: Equatable {
     /// Note, envelope, and gain (1 = a note in a triad; bigger chords pass 3/n to keep the original loudness).
-    case noteOn(Int, ADSR, gain: Double = 1)
-    case noteOff(Int)
+    /// `layer` keeps sources apart: a note only reuses or releases voices on its own layer, so the sequencer and
+    /// live playing can sound the same pitch without cutting each other off.
+    case noteOn(Int, ADSR, gain: Double = 1, layer: Int = 0)
+    case noteOff(Int, layer: Int = 0)
     case allNotesOff
+    /// Releases every note on one layer.
+    case releaseLayer(Int)
     case setBPM(Double)
+    /// Drops this layer's scheduled events that haven't played yet.
+    case cancelScheduled(layer: Int)
+}
+
+/// Live playing is layer 0; the sequencer plays on its own layer.
+public let liveLayer = 0, sequencerLayer = 1
+
+/// An event to play when the beat clock reaches `beat`.
+public struct TimedEvent: Equatable {
+    public var beat: Double
+    public var event: VoiceEvent
+    public init(_ beat: Double, _ event: VoiceEvent) { self.beat = beat; self.event = event }
 }
 
 /// Notes to stop and start to go from one set of sounding notes to another; shared notes keep ringing.
@@ -39,6 +55,7 @@ public struct VoiceEngine {
 
     public struct Voice {
         public var note = 0
+        public var layer = 0
         public var stage = Stage.idle
         public var level = 0.0
         var adsr = envelopePresets[0].adsr
@@ -59,25 +76,56 @@ public struct VoiceEngine {
     public private(set) var beats = 0.0
     public private(set) var sampleTime: Int64 = 0
     private var lp = 0.0
+    /// Pending timed events, sorted by beat. Preallocated so scheduling never allocates on the audio thread.
+    public static let scheduleCapacity = 1024
+    private var scheduled: [TimedEvent] = []
+    public var scheduledCount: Int { scheduled.count }
 
     public init(sampleRate: Double, voiceCount: Int = 16) {
         self.sampleRate = sampleRate
         voices = Array(repeating: Voice(), count: voiceCount)
+        scheduled.reserveCapacity(Self.scheduleCapacity)
     }
 
     public var activeNotes: [Int] { voices.filter { $0.stage != .idle }.map(\.note).sorted() }
-    public func voice(for note: Int) -> Voice? { voices.first { $0.stage != .idle && $0.note == note } }
+    public func voice(for note: Int, layer: Int = 0) -> Voice? {
+        voices.first { $0.stage != .idle && $0.note == note && $0.layer == layer }
+    }
+    public func activeNotes(layer: Int) -> [Int] {
+        voices.filter { $0.stage != .idle && $0.layer == layer }.map(\.note).sorted()
+    }
+
+    /// Queues an event for a beat; one already due plays on the next sample. Dropped when the queue is full.
+    public mutating func schedule(_ t: TimedEvent) {
+        guard scheduled.count < Self.scheduleCapacity else { return }
+        // Insert after any event at the same beat, so events keep the order they were sent in.
+        var i = scheduled.count
+        while i > 0, scheduled[i - 1].beat > t.beat { i -= 1 }
+        scheduled.insert(t, at: i)
+    }
 
     public mutating func handle(_ e: VoiceEvent) {
         switch e {
-        case .noteOn(let n, let adsr, let gain): noteOn(n, adsr, gain)
-        case .noteOff(let n):
-            for i in voices.indices where voices[i].note == n && voices[i].stage != .idle && voices[i].stage != .release {
+        case .noteOn(let n, let adsr, let gain, let layer): noteOn(n, adsr, gain, layer)
+        case .noteOff(let n, let layer):
+            for i in voices.indices where voices[i].note == n && voices[i].layer == layer
+                && voices[i].stage != .idle && voices[i].stage != .release {
                 startRelease(i)
             }
         case .allNotesOff:
             for i in voices.indices where voices[i].stage != .idle && voices[i].stage != .release { startRelease(i) }
+        case .releaseLayer(let l):
+            for i in voices.indices where voices[i].layer == l && voices[i].stage != .idle && voices[i].stage != .release {
+                startRelease(i)
+            }
         case .setBPM(let b): bpm = min(bpmRange.upperBound, max(bpmRange.lowerBound, b))
+        case .cancelScheduled(let layer):
+            scheduled.removeAll { e in
+                switch e.event {
+                case .noteOn(_, _, _, let l), .noteOff(_, let l): l == layer
+                default: false
+                }
+            }
         }
     }
 
@@ -86,13 +134,16 @@ public struct VoiceEngine {
         voices[i].stage = .release
     }
 
-    private mutating func noteOn(_ n: Int, _ adsr: ADSR, _ gain: Double) {
+    private mutating func noteOn(_ n: Int, _ adsr: ADSR, _ gain: Double, _ layer: Int) {
         // Reuse this note's voice if it's still ringing, else a free one, else steal: quietest releasing, then oldest.
-        let i = voices.firstIndex { $0.stage != .idle && $0.note == n }
+        let i = voices.firstIndex { $0.stage != .idle && $0.note == n && $0.layer == layer }
             ?? voices.firstIndex { $0.stage == .idle }
             ?? stealIndex()
-        if voices[i].stage == .idle || voices[i].note != n { voices[i].phases = (0, 0); voices[i].level = 0 }
+        if voices[i].stage == .idle || voices[i].note != n || voices[i].layer != layer {
+            voices[i].phases = (0, 0); voices[i].level = 0
+        }
         voices[i].note = n
+        voices[i].layer = layer
         voices[i].freq = midiToHz(n)
         voices[i].adsr = adsr
         voices[i].gain = gain
@@ -133,6 +184,7 @@ public struct VoiceEngine {
     public mutating func render(frames: Int, into out: UnsafeMutablePointer<Float>) {
         let sr = sampleRate
         for f in 0..<frames {
+            while let first = scheduled.first, first.beat <= beats { scheduled.removeFirst(); handle(first.event) }
             var s = 0.0
             for i in voices.indices where voices[i].stage != .idle {
                 advanceEnvelope(i)

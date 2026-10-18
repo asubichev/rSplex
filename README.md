@@ -12,7 +12,13 @@ A chord synth for macOS, played from the computer keyboard.
 | ← / → | key |
 | ↑ / ↓ | octave (-2 to +2) |
 | Tab / Shift+Tab | next / previous scale |
-| Z | inversion |
+| Space | sequencer play / stop |
+| Shift + chord | record into the cell after the cursor, then move past it: keep holding to change the number-row modifier or switch chords; the step keeps what you end on |
+| Shift + ← / → | move the cursor (it sits between cells) |
+| Shift + ↑ / ↓ | shorter / longer steps (1/4, 1/2, 1 bar, 2 bars) |
+| Shift + Delete | empty the cell before the cursor and move back |
+| [ / ] | tempo −1 / +1 BPM (40–300) |
+| \\ | tap tempo (3+ taps) |
 | V | voice leading on/off |
 | B | bass: OFF / ROOT / SLASH (hold the bass chord key, then the chord) |
 | L | hold-to-lock on/off |
