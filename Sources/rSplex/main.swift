@@ -4,7 +4,7 @@ import rSplexCore
 
 let degreeKeys = ["a", "s", "d", "f", "g", "h", "j"]
 /// Keys that only change sound, tempo, or the sequencer; pressing them leaves a lock in place.
-let lockSafeChars: Set<String> = ["e", "[", "]", "\\"]
+let lockSafeChars: Set<String> = ["e", "m", "[", "]", "\\"]
 let lockSafeKeyCodes: Set<UInt16> = [49]   // Space
 let shiftLockSafeKeyCodes: Set<UInt16> = [123, 124, 125, 126, 51]   // Shift + arrows, Shift+Delete
 /// Number row 1…0 by key code, so Shift (which turns 1 into !) doesn't change which modifier a key is.
@@ -22,6 +22,17 @@ final class Synth {
     private var drainingTimed: [TimedEvent] = []
     private var core: VoiceEngine
     private var beatsSnapshot = 0.0
+    /// MIDI: where to send (read on the audio thread under the lock), and a preallocated packet buffer.
+    let midi = MIDIOutput()
+    private var midiTarget: MIDITarget?
+    private let midiBuffer = UnsafeMutableRawPointer.allocate(byteCount: 64 * 1024, alignment: 8)
+    private static let midiBufferSize = 64 * 1024
+    private let ticksPerSecond: Double = {
+        var tb = mach_timebase_info_data_t(); mach_timebase_info(&tb)
+        return 1e9 * Double(tb.denom) / Double(tb.numer)
+    }()
+    /// MIDI is stamped this far after the render time so it lines up with the audio leaving the speakers.
+    private var outputLatency = 0.0
 
     init() {
         let sr = engine.outputNode.outputFormat(forBus: 0).sampleRate
@@ -29,7 +40,7 @@ final class Synth {
         pending.reserveCapacity(256); draining.reserveCapacity(256)
         pendingTimed.reserveCapacity(256); drainingTimed.reserveCapacity(256)
         let fmt = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 1)!
-        let src = AVAudioSourceNode(format: fmt) { [unowned self] _, _, frameCount, abl in
+        let src = AVAudioSourceNode(format: fmt) { [unowned self] _, timestamp, frameCount, abl in
             let out = UnsafeMutableAudioBufferListPointer(abl)[0].mData!.assumingMemoryBound(to: Float.self)
             // Swap buffers under the lock so the audio thread never allocates.
             self.lock.lock()
@@ -40,12 +51,35 @@ final class Synth {
             self.draining.removeAll(keepingCapacity: true)
             self.drainingTimed.removeAll(keepingCapacity: true)
             self.core.render(frames: Int(frameCount), into: out)
-            self.lock.lock(); self.beatsSnapshot = self.core.beats; self.lock.unlock()
+            self.lock.lock(); self.beatsSnapshot = self.core.beats; let target = self.midiTarget; self.lock.unlock()
+            if let target, !self.core.midi.events.isEmpty { self.sendMIDI(to: target, hostTime: timestamp.pointee.mHostTime) }
+            self.core.midi.clear()
             return noErr
         }
         engine.attach(src)
         engine.connect(src, to: engine.mainMixerNode, format: fmt)
         do { try engine.start() } catch { print("Audio failed: \(error)") }
+        outputLatency = engine.outputNode.presentationLatency
+    }
+
+    /// Packs this buffer's MIDI events into one event list, each stamped with the host time of its sample.
+    private func sendMIDI(to target: MIDITarget, hostTime: UInt64) {
+        let list = midiBuffer.assumingMemoryBound(to: MIDIEventList.self)
+        var packet = MIDIEventListInit(list, ._1_0)
+        let sr = core.sampleRate
+        for e in core.midi.events {
+            var word = e.message.umpWord(channel: 0)
+            let t = hostTime + UInt64((Double(e.frame) / sr + outputLatency) * ticksPerSecond)
+            packet = MIDIEventListAdd(list, Self.midiBufferSize, packet, t, 1, &word)
+        }
+        midi.send(list, to: target)
+    }
+
+    /// Chooses where MIDI goes (nil = off). Turning MIDI on mutes the built-in synth so only the device sounds.
+    func setMIDITarget(_ t: MIDITarget?) {
+        lock.lock(); let old = midiTarget; midiTarget = t; lock.unlock()
+        if let old, old != t { midi.panic(old) }
+        send([.setMIDI(t != nil), .setMuted(t != nil)])
     }
 
     func send(_ events: [VoiceEvent]) {
@@ -83,6 +117,10 @@ final class ChordView: NSView {
     /// moves on only once every chord key is released.
     var recSlot: Int?
     var shiftHeld = false
+    /// MIDI output by name (names survive the device list being rebuilt); nil = off. `midiChosen` turns off
+    /// picking an OP-1 automatically once you've chosen yourself.
+    var midiName: String?
+    var midiChosen = false
     /// How far ahead steps are handed to the audio thread, which then plays them on the exact sample.
     static let lookaheadSeconds = 0.12
     /// Lock animation: when the current lock started (pulse), and the degree/time of the last unlock (badge fade).
@@ -99,6 +137,8 @@ final class ChordView: NSView {
 
     override func viewDidMoveToWindow() {
         guard timer == nil else { return }
+        synth.midi.onChange = { [weak self] in self?.midiDevicesChanged() }
+        midiDevicesChanged()
         // Drives the lock timer and its animation; idle frames do nothing.
         let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(t, forMode: .common)
@@ -160,6 +200,7 @@ final class ChordView: NSView {
             else if c == "v" { state.voiceLeading.toggle() }
             else if c == "b" { state.cycleBass() }
             else if c == "l" { state.lockEnabled.toggle() }
+            else if c == "m" { cycleMIDI() }
             else if c == "[" || c == "]" { setBPM(bpm.rounded() + (c == "]" ? 1 : -1)) }
             else if c == "\\" { if let b = tapTempo.tap(at: now) { setBPM(b.rounded()) } }
             else { update(); super.keyDown(with: e); return }
@@ -171,6 +212,28 @@ final class ChordView: NSView {
         guard let c = e.charactersIgnoringModifiers?.lowercased() else { return }
         if let d = degreeKeys.firstIndex(of: c) { state.release(degree: d); update() }
         else if let m = modKeyCodes.firstIndex(of: e.keyCode) { state.release(mod: m); update() }
+    }
+
+    var midiTarget: MIDITarget? { synth.midi.targets.first { $0.name == midiName } }
+
+    /// M: off → each output in turn → off.
+    func cycleMIDI() {
+        let names = synth.midi.targets.map(\.name)
+        let i = midiName.flatMap { names.firstIndex(of: $0) }
+        midiName = i.map { $0 + 1 < names.count ? names[$0 + 1] : nil } ?? names.first
+        midiChosen = true
+        synth.setMIDITarget(midiTarget)
+    }
+
+    /// Devices came or went: drop an output that's gone, and pick up an OP-1 when it's plugged in, unless
+    /// you've already chosen an output yourself.
+    func midiDevicesChanged() {
+        if midiName != nil, midiTarget == nil { midiName = nil }
+        if !midiChosen, midiName == nil, let op1 = synth.midi.targets.first(where: { $0.name.localizedCaseInsensitiveContains("OP-1") }) {
+            midiName = op1.name
+        }
+        synth.setMIDITarget(midiTarget)
+        needsDisplay = true
     }
 
     func setBPM(_ b: Double) {
@@ -197,12 +260,13 @@ final class ChordView: NSView {
         playing = true
         nextStepIdx = 0
         nextStepBeat = synth.beats + 0.02 * bpm / 60
+        synth.schedule([TimedEvent(nextStepBeat, .midiStart)])   // the device's sequencer starts with ours
         scheduleSteps()
     }
 
     func stopSequence() {
         playing = false
-        synth.send([.cancelScheduled(layer: sequencerLayer), .releaseLayer(sequencerLayer)])
+        synth.send([.cancelScheduled(layer: sequencerLayer), .releaseLayer(sequencerLayer), .midiStop])
         seqSounding = []
         playheadQueue = []
         playhead = nil
@@ -317,6 +381,12 @@ final class ChordView: NSView {
         let rec = NSAttributedString(string: recSlot != nil ? "● REC   " : "",
                                      attributes: [.font: NSFont.boldSystemFont(ofSize: 12), .foregroundColor: NSColor.systemRed])
         let transport = NSMutableAttributedString(attributedString: rec)
+        // MIDI output (M), lit when on; the built-in synth is muted while it is.
+        let midiItem = NSMutableAttributedString(string: "MIDI \(midiName.map { "→ \($0.count > 18 ? $0.prefix(17) + "…" : $0)" } ?? "OFF")",
+            attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: midiName != nil ? NSColor.white : NSColor.lightGray])
+        midiItem.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: NSRange(location: 0, length: 1))
+        transport.append(midiItem)
+        transport.append(NSAttributedString(string: "     ", attributes: small))
         transport.append(NSAttributedString(string: "\(playing ? "▶" : "■")  \(Int(bpm)) BPM   \(stepLengths[seq.stepLengthIdx].name) / step",
                                             attributes: small))
         transport.draw(at: NSPoint(x: bounds.width - 20 - transport.size().width, y: 64))
@@ -441,6 +511,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func windowDidResignKey(_ n: Notification) { view.releaseAll() }
+    /// Nothing left hanging on the device after quitting.
+    func applicationWillTerminate(_ n: Notification) { view.midiTarget.map(view.synth.midi.panic) }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
 }
 

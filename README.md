@@ -19,6 +19,7 @@ A chord synth for macOS, played from the computer keyboard.
 | Shift + Delete | empty the cell before the cursor and move back |
 | [ / ] | tempo −1 / +1 BPM (40–300) |
 | \\ | tap tempo (3+ taps) |
+| M | MIDI out: OFF → rSplex (virtual) → each connected device → OFF. Picks an OP-1 automatically when it's plugged in. The built-in synth is muted while MIDI is on. |
 | V | voice leading on/off |
 | B | bass: OFF / ROOT / SLASH (hold the bass chord key, then the chord) |
 | L | hold-to-lock on/off |
